@@ -1,0 +1,11 @@
+version: "3.8"
+services:
+  gainhound:
+    image: gainhound:latest
+    container_name: gainhound
+    environment:
+      - TZ=America/New_York
+    volumes:
+      - /mnt/media/Music:/data/music
+      - /mnt/user/appdata/gainhound:/data
+    restart: unless-stopped

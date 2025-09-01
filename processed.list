@@ -1,0 +1,8 @@
+# ============================================================================
+# File: processed.list
+# Purpose: Tracks normalized files to prevent reprocessing
+# Format: Absolute path to each file
+# ============================================================================
+
+/music/Artist/Album/01 - Song.mp3
+/music/Another Artist/Album/Track.mp3
