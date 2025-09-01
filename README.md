@@ -1,58 +1,38 @@
-# Gainhound
+* **Overview:** What Gainhound does (gain scan → integrity → optional re-encode → trigger Plex loudness analyze).
+* **Directories / mounts:**
 
-Gainhound is a focused MP3 normalization container that checks and adjusts audio gain, file integrity, and optionally re-encodes MP3 files when significant gain changes are detected.
+  * `/music` → your library (bind from host)
+  * `/data` → state/logs/config (`config.conf`, `processed.list`, logs)
+* **Config (`/data/config.conf`):**
 
-## Features
+  * `RUN_MODE` (`initial|watch|once|manual`)
+  * `RUN_GAIN_CHECK`, `RUN_INTEGRITY_CHECK`, `RUN_REENCODE_FOR_GAIN`
+  * `GAIN_THRESHOLD` (dB; absolute, handles + and −)
+  * `GAINHOUND_CRON` (e.g., `0 3 * * *`)
+  * Plex: `FORCE_PLEX_ANALYZE`, `PLEX_URL`, `PLEX_TOKEN`
+* **Cron & rotation:**
 
-- Gain analysis using `mp3gain`
-- Integrity checks using `ffmpeg`
-- Optional re-encode via `ffmpeg` when gain shifts are too large
-- Optional forced Plex audio analysis via PlexAPI
-- Clean log and state management with daily cleanup
+  * `setup_cron.sh` writes `/etc/cron.d/gainhound_jobs`
+  * Nightly rotation via `log_rotate.sh` (date-stamped `.gz`), and logs themselves now include `[YYYY-MM-DD HH:MM:SS]`.
+* **Re-encode flow:**
 
-## Configuration
+  * `reencode.sh` (shell wrapper) → `reencode_gain.py` (selection + ffmpeg)
+  * After a successful re-encode: remove from `processed.list`, then post-hook triggers `plex_analyze.sh`
+* **Plex loudness analyze (not sonic):**
 
-All settings are controlled via `config.conf`:
+  * We trigger **library-level** analyze via `force_plex_analyze.py` called from `plex_analyze.sh`.
+  * Ensure server setting **“Analyze audio tracks for loudness”** is enabled; disable sonic if you don’t want the heavy pass.
+* **Manual test commands:**
 
-```conf
-# Folder with MP3 files to normalize
-MUSIC_DIR="/music"
+  * `bash /scripts/gain_check.sh`
+  * `bash /scripts/integrity_check.sh`
+  * `bash /scripts/reencode.sh` (supports `MAX_FILES`)
+  * `bash /scripts/plex_analyze.sh`
+* **Docker/Compose examples:** include corrected compose above and a `docker run` sample.
+* **Optional utilities:** `undo_gain.sh` (describe usage if you intend to keep it).
 
-# General execution mode: 'initial' or 'undo'
-RUN_MODE="initial"
+# Small consistency tweaks (nice to have)
 
-# Scheduled cron job for main functions (gain/integrity/encode)
-CRON_SCHEDULE="0 3 * * *" # daily at 5AM
-
-# Execution Toggles
-RUN_GAIN_CHECK=false
-RUN_INTEGRITY_CHECK=false
-RUN_REENCODE_FOR_GAIN=false
-
-# Cron Schedule for Plex Force Analyze (only used if FORCE_PLEX_ANALYZE=true)
-PLEX_CRON="0 0 * * WED"  # daily at 5AM
-
-# Plex
-PLEX_URL=http://localhost:32400
-PLEX_TOKEN=your_token_here
-```
-
-## Folder Structure
-
-```
-/scripts/
-  gain_check.sh
-  integrity_check.sh
-  reencode_high_gain.sh
-  cleanup_logs.sh
-  undo_gain_changes.sh
-  plex_force_analyze.py
-entrypoint.sh
-config.conf
-```
-
-## Logs
-
-Logs are rotated daily and stored in `/data/logs`. A file `/data/processed.list` (non-hidden) is used to track completed files and avoid reprocessing.
-
-# gainhound
+* **Logging:** you already added full `[YYYY-MM-DD HH:MM:SS]` across scripts—good. Consider bumping `normalize_mp3s.sh` timestamps if you keep it (currently HH\:MM\:SS only).
+* **Single source of truth for log retention:** if you want `cleanup_logs.sh` age-based deletion, add it to `setup_cron.sh` (e.g., `0 4 * * * root /scripts/cleanup_logs.sh >> /data/logs/cron_logcleanup.log 2>&1`). Otherwise delete it.
+* **README badges / sections:** add “Known limitations” (e.g., extremely abnormal “silence” files can appear as > +20 dB; we can filter them if you want).

@@ -5,7 +5,16 @@ services:
     container_name: gainhound
     environment:
       - TZ=America/New_York
+      # Optional flags (mirror your /data/config.conf if you prefer envs)
+      # - RUN_MODE=initial
+      # - RUN_GAIN_CHECK=true
+      # - RUN_INTEGRITY_CHECK=true
+      # - RUN_REENCODE_FOR_GAIN=false
+      # - GAIN_THRESHOLD=5
+      # - PLEX_URL=http://192.168.5.20:32400
+      # - PLEX_TOKEN=...             # if FORCE_PLEX_ANALYZE=true
+      # - FORCE_PLEX_ANALYZE=false   # we trigger via re-encode posthook anyway
     volumes:
-      - /mnt/media/Music:/data/music
+      - /mnt/media/Music:/music          # <-- fix: container expects /music
       - /mnt/user/appdata/gainhound:/data
     restart: unless-stopped
