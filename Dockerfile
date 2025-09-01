@@ -3,6 +3,10 @@
 # Lightweight container for MP3 gain analysis, integrity checks, and re-encoding
 # Based on Python 3.11 slim
 # -----------------------------------------------------
+
+ARG VERSION=0.0.0
+LABEL version="${VERSION}"
+
 FROM python:3.11-slim
 
 # ---------------------------
