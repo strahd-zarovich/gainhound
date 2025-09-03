@@ -4,10 +4,10 @@
 # Based on Python 3.11 slim
 # -----------------------------------------------------
 
+FROM python:3.11-slim
+
 ARG VERSION=0.0.0
 LABEL version="${VERSION}"
-
-FROM python:3.11-slim
 
 # ---------------------------
 # Install required packages

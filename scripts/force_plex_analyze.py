@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 # ==============================================================================
 # File:        force_plex_analyze.py
-# Purpose:     Per-track "Analyze" for a Plex Music library using PlexAPI.
+# Purpose:     Library-level Scan -> optional Analyze for a Plex Music library.
 # Author:      Gainhound Project
 # ------------------------------------------------------------------------------
-# Env:
-#   PLEX_URL           : http://<host>:32400 (required)
-#   PLEX_TOKEN         : X-Plex-Token string (required)
-#   PLEX_LIBRARY       : Library name (default: "Music")
-#   PLEX_RATE_DELAY    : Seconds between track analyzes (default: 0.10)
-#   LOG_DIR            : Log folder (default: /data/logs)
-#   LOG_PROGRESS_EVERY : Progress cadence in tracks (default: 50)
+# Env (config.conf):
+#   FORCE_PLEX_ANALYZE   : true|false  (if false, script logs+exits 0)
+#   PLEX_ANALYZE_LOUDNESS: true|false  (if true, run section.analyze() after scan)
+#   PLEX_URL             : http://<host>:32400  (required when FORCE_PLEX_ANALYZE=true)
+#   PLEX_TOKEN           : X-Plex-Token string  (required when FORCE_PLEX_ANALYZE=true)
+#   PLEX_LIBRARY         : Library title (default: "Music")
+#   LOG_DIR              : Log folder (default: /data/logs)
 #
 # Logs:
-#   /data/logs/plex_analyze.log   (each line starts with [HH:MM:SS])
-#   /data/logs/plex_analyze.lock  (advisory lock to prevent concurrent runs)
+#   /data/logs/plex_analyze.log   (each line starts with [YYYY-MM-DD HH:MM:SS])
+#   /data/plex_analyze.lock       (advisory lock to prevent concurrent runs)
 # ==============================================================================
 
 import os
@@ -26,66 +26,72 @@ import requests
 from datetime import datetime
 from plexapi.server import PlexServer
 
+# ------------- utils / logging -------------
 def ts() -> str:
     return f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]"
 
-def getenv_clean(name: str, default: str = "") -> str:
+def getenv_clean(name: str, default: str | None = None) -> str | None:
     v = os.getenv(name, default)
     if v is None:
-        v = default
-    return v.strip().strip('"').strip("'")
+        return None
+    v = v.strip()
+    if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
+        v = v[1:-1]
+    return v
 
-# --------------------------- Config ---------------------------
-LOG_DIR = getenv_clean("LOG_DIR", "/data/logs")
+LOG_DIR = getenv_clean("LOG_DIR") or "/data/logs"
 os.makedirs(LOG_DIR, exist_ok=True)
 LOG_PATH = os.path.join(LOG_DIR, "plex_analyze.log")
-LOCK_PATH = "/data/plex_analyze.lock"
 
-PLEX_URL = getenv_clean("PLEX_URL")
-PLEX_TOKEN = getenv_clean("PLEX_TOKEN")
-PLEX_LIBRARY = getenv_clean("PLEX_LIBRARY") or "Music"
-RATE_DELAY = float(getenv_clean("PLEX_RATE_DELAY") or "0.10")
-PROGRESS_EVERY = int(getenv_clean("LOG_PROGRESS_EVERY") or "50")
-
-# --------------------------- Logging --------------------------
-def log(msg: str):
+def log(msg: str) -> None:
     line = f"{ts()} [PLEX] {msg}"
-    # stdout (caller redirects to file too)
     print(line, flush=True)
-    # file
     try:
         with open(LOG_PATH, "a", encoding="utf-8") as f:
             f.write(line + "\n")
     except Exception:
         pass
 
-# --------------------------- Locking --------------------------
-_lock_file = None
-def acquire_lock():
-    global _lock_file
-    _lock_file = open(LOCK_PATH, "w")
+# ------------- config -------------
+FORCE_PLEX_ANALYZE    = (getenv_clean("FORCE_PLEX_ANALYZE") or "false").lower() in ("1","true","yes","on","y")
+PLEX_ANALYZE_LOUDNESS = (getenv_clean("PLEX_ANALYZE_LOUDNESS") or "false").lower() in ("1","true","yes","on","y")
+
+PLEX_URL      = getenv_clean("PLEX_URL")
+PLEX_TOKEN    = getenv_clean("PLEX_TOKEN")
+PLEX_LIBRARY  = getenv_clean("PLEX_LIBRARY") or "Music"
+
+LOCK_PATH = "/data/plex_analyze.lock"
+_lock_fh = None
+
+def acquire_lock() -> bool:
+    global _lock_fh
     try:
-        fcntl.flock(_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _lock_fh = open(LOCK_PATH, "a+")
+        fcntl.flock(_lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _lock_fh.seek(0); _lock_fh.truncate()
+        _lock_fh.write(f"{os.getpid()}\n"); _lock_fh.flush()
         return True
     except BlockingIOError:
         log("Another instance is already running; exiting.")
         return False
+    except Exception as e:
+        log(f"ERROR: Could not open/lock {LOCK_PATH}: {e}")
+        return False
 
 def release_lock():
     try:
-        if _lock_file:
-            fcntl.flock(_lock_file, fcntl.LOCK_UN)
-            _lock_file.close()
+        if _lock_fh:
+            fcntl.flock(_lock_fh, fcntl.LOCK_UN)
+            _lock_fh.close()
     except Exception:
         pass
 
 atexit.register(release_lock)
 
-# --------------------------- Helpers --------------------------
-def wait_for_plex(base: str, token: str, max_retries: int = 30, delay: int = 5) -> bool:
-    """Check Plex is online by querying /library/sections with the token."""
+def wait_for_plex(base: str, token: str, tries: int = 30, delay: float = 2.0) -> bool:
+    """Light readiness probe against /library/sections with token."""
     url = f"{base.rstrip('/')}/library/sections"
-    for attempt in range(max_retries):
+    for _ in range(tries):
         try:
             r = requests.get(url, params={"X-Plex-Token": token}, timeout=5)
             if r.status_code == 200:
@@ -95,11 +101,16 @@ def wait_for_plex(base: str, token: str, max_retries: int = 30, delay: int = 5) 
         time.sleep(delay)
     return False
 
-# --------------------------- Main -----------------------------
 def main() -> int:
+    # Disabled? Exit cleanly so cron logs stay quiet.
+    if not FORCE_PLEX_ANALYZE:
+        log("FORCE_PLEX_ANALYZE=false; nothing to do.")
+        return 0
+
+    # Require URL/token only when enabled
     if not PLEX_URL or not PLEX_TOKEN:
         log(f"ERROR: Missing PLEX_URL/PLEX_TOKEN (URL={bool(PLEX_URL)}, TOKEN={bool(PLEX_TOKEN)})")
-        return 1
+        return 2
 
     if not acquire_lock():
         return 0
@@ -108,75 +119,53 @@ def main() -> int:
 
     if not wait_for_plex(PLEX_URL, PLEX_TOKEN):
         log("ERROR: Plex did not come online in time.")
-        return 2
+        return 3
 
+    # Connect
     try:
         plex = PlexServer(PLEX_URL.rstrip("/"), PLEX_TOKEN)
     except Exception as e:
         log(f"ERROR: Failed to create PlexServer: {e}")
-        return 3
+        return 4
 
-    # Find the Music section by library title; TYPE == 'artist' for music libraries
+    # Locate section
     try:
-        target_sections = [s for s in plex.library.sections() if getattr(s, "title", "") == PLEX_LIBRARY]
-        if not target_sections:
-            # fallback: first music-type section
-            music_sections = [s for s in plex.library.sections() if getattr(s, "TYPE", "") == "artist"]
-            if not music_sections:
-                log(f'ERROR: Library "{PLEX_LIBRARY}" not found and no music sections detected.')
-                return 4
-            section = music_sections[0]
+        section = next(s for s in plex.library.sections() if getattr(s, "title", "") == PLEX_LIBRARY)
+    except StopIteration:
+        # fallback: first music-type section
+        try:
+            section = next(s for s in plex.library.sections() if getattr(s, "TYPE", "") == "artist")
             log(f'WARN: Library "{PLEX_LIBRARY}" not found; using music section "{section.title}".')
-        else:
-            section = target_sections[0]
+        except StopIteration:
+            log(f'ERROR: Library "{PLEX_LIBRARY}" not found and no music sections detected.')
+            return 5
     except Exception as e:
         log(f"ERROR: Could not list sections: {e}")
-        return 5
-
-    log("Starting per-track analyze (this will be visible in Plex Activity).")
-
-    total = ok = fail = 0
-
-    try:
-        # Iterate artists → albums → tracks
-        # section.search() returns artists; section.all() would also work.
-        for artist in section.search():
-            for album in artist.albums():
-                for track in album.tracks():
-                    total += 1
-                    try:
-                        # Prefer loudness-only analysis if available; fallback to full analyze.
-                        loud_fn = getattr(track, "analyzeLoudness", None)
-                        if callable(loud_fn):
-                              loud_fn()  # issues PUT /library/metadata/{rk}/analyzeLoudness
-                        else:
-                              track.analyze()  # fallback: sonic+metadata analysis
-                        ok += 1
-                    except Exception as ex:
-                            fail += 1
-                            log(f'WARN: Analyze failed: "{track.title}" by "{artist.title}": {ex}')
-
-                    if ok % PROGRESS_EVERY == 0 or total % PROGRESS_EVERY == 0:
-                        log(f"Progress: ok={ok}, fail={fail}, total={total}")
-
-                    time.sleep(RATE_DELAY)
-
-    except KeyboardInterrupt:
-        log(f"Interrupted: ok={ok}, fail={fail}, total={total}")
-        return 130
-
-    log(f"Analysis complete: ok={ok}, fail={fail}, total={total}")
-    return 0
-
-    # Loudness-only path: rely on server settings (Library → Analyze audio tracks for loudness).
-    log(f"Triggering library analyze for loudness on '{section.title}' (uses server settings).")
-    try:
-        section.analyze()  # schedules analyze jobs; with loudness enabled and sonic off, this is loudness-only
-        log("Library analyze request submitted to Plex Server.")
-        return 0
-    except Exception as e:
-        log(f"ERROR: Library analyze request failed: {e}")
         return 6
+
+    # --- SCAN (always when FORCE_PLEX_ANALYZE=true) ---
+    try:
+        log(f'Starting library scan (update) on "{section.title}"...')
+        section.update()  # "Scan Library Files"
+        log("Library scan submitted to Plex Server.")
+    except Exception as e:
+        log(f"ERROR: Library scan request failed: {e}")
+        return 7
+
+    # --- ANALYZE (only if PLEX_ANALYZE_LOUDNESS=true) ---
+    if PLEX_ANALYZE_LOUDNESS:
+        try:
+            log(f'Starting library analyze on "{section.title}" (server settings decide loudness/sonic)...')
+            section.analyze()  # schedules analyze jobs; respects server toggles
+            log("Library analyze request submitted to Plex Server.")
+        except Exception as e:
+            log(f"ERROR: Library analyze request failed: {e}")
+            return 8
+    else:
+        log("PLEX_ANALYZE_LOUDNESS=false; skipping library analyze.")
+
+    log("Plex Scan/Analyze cycle finished.")
+    return 0
 
 if __name__ == "__main__":
     sys.exit(main())
